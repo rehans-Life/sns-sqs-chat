@@ -1,0 +1,119 @@
+Parameters:
+  Environment:
+    Description: Select Deployment Environment
+    Type: String
+    AllowedValues:
+      - dev
+      - prod
+    Default: dev
+
+Conditions:
+  IsProdEnvironment: !Equals [!Ref Environment, prod]
+
+Resources:
+  snsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: MessagesTopic
+      FifoTopic: false
+
+  sqsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: MessageQueue
+      ReceiveMessageWaitTimeSeconds: 20
+      VisibilityTimeout: 20
+
+  snsAccessSqsPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref sqsQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: snsAccessSqsPolicy
+            Effect: Allow
+            Action: 
+              - SQS:SendMessage
+              - SQS:SendMessageBatch
+            Principal: 
+              Service: sns.amazonaws.com
+            Resource: !GetAtt sqsQueue.Arn
+            Condition:
+              ArnEquals: 
+                aws:SourceArn: !Ref snsTopic
+
+  sqsQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Condition: IsProdEnvironment
+    Properties:
+      Queues:
+        - !Ref sqsQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: sqsQueuePolicy
+            Effect: Allow
+            Action:
+              - SQS:RecieveMessage
+              - SQS:ChangeMessageVisibility
+              - SQS:DeleteMessage
+            Principal: 
+              AWS: !GetAtt iamRole.Arn
+            Resource: !GetAtt sqsQueue.Arn
+             
+  snsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref snsTopic
+      Protocol: sqs
+      Endpoint: !GetAtt sqsQueue.Arn
+      RawMessageDelivery: true
+
+  ec2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: IsProdEnvironment
+    Properties:
+      GroupDescription: security group to provide ssh and http access
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  ec2Instance:
+    Type: AWS::EC2::Instance
+    Condition: IsProdEnvironment
+    Properties:
+      AvailabilityZone: me-south-1a
+      KeyName: message-service
+      ImageId: ami-07caf09b362be10b8
+      InstanceType: t2.micro
+      IamInstanceProfile: !Ref iamInstanceProfile
+      SecurityGroups:
+        - !Ref ec2SecurityGroup
+
+  iamInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Condition: IsProdEnvironment
+    Properties:
+      Path: /
+      Roles:
+        - !Ref iamRole
+
+  iamRole:
+    Type: AWS::IAM::Role
+    Condition: IsProdEnvironment
+    Properties:
+      AssumeRolePolicyDocument:
+         Version: "2012-10-17"
+         Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole

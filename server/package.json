@@ -1,0 +1,28 @@
+{
+  "name": "server",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "SET NODE_ENV=development&&nodemon ./src/server.js",
+    "prod": "SET NODE_ENV=production&&node ./src/server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@aws-sdk/client-sns": "^3.569.0",
+    "aws-sdk": "^2.1615.0",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "helmet": "^7.1.0",
+    "mongodb": "^6.6.1",
+    "mongoose": "^8.3.4",
+    "socket.io": "^4.7.5"
+  },
+  "devDependencies": {
+    "dotenv": "^16.4.5",
+    "morgan": "^1.10.0",
+    "nodemon": "^3.1.0"
+  }
+}
