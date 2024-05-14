@@ -3,6 +3,8 @@ const { createServer } = require("http");
 const express = require("express");
 const { Server } = require("socket.io");
 const { PublishCommand, SubscribeCommand } = require("@aws-sdk/client-sns");
+const AWSXRay = require("aws-xray-sdk");
+AWSXRay.setContextMissingStrategy("LOG_ERROR");
 
 const morgan = require("morgan");
 const helmet = require("helmet");
@@ -32,6 +34,8 @@ const SNS_TOPIC_ARN = process.env.SNS_TOPIC_ARN;
 const BACKEND_URI = process.env.BACKEND_URI;
 const Message = mongoose.model("Message", new mongoose.Schema(), "messages");
 
+app.use(AWSXRay.express.openSegment(BACKEND_URI));
+
 app.use((req, _, next) => {
   if (req.headers["x-amz-sns-message-type"]) {
     req.headers["content-type"] = "application/json";
@@ -42,60 +46,69 @@ app.use((req, _, next) => {
 app.use(express.json());
 app.use(cors());
 app.use(helmet());
-if (NODE_ENV === "development") app.use(morgan("dev"));
+app.use(morgan("dev"));
 
 app
   .route("/")
   .get((_, res) => res.status(200).send("Hi, Hello how are you!"))
   .post(notificationController);
 
-app.route("/messages").get(async (_, res) => {
-  const messages = await Message.find();
-  console.log(messages);
-  return res.status(200).json({
-    status: "success",
-    data: {
-      messages,
-    },
+app
+  .route("/messages")
+  .post(async (req, res) => {
+    try {
+      const body = req.body;
+
+      console.log(body);
+
+      if (!body.username) return res.status(404).send("No Username found");
+
+      const command = new PublishCommand({
+        Message: JSON.stringify(body),
+        TopicArn: SNS_TOPIC_ARN,
+      });
+
+      await client.send(command);
+
+      res.status(200).send("Message Added");
+    } catch (error) {
+      return res.status(500).send("Internal Server Error");
+    }
+  })
+  .get(async (_, res) => {
+    AWSXRay.captureAsyncFunc("mongodb", async function (subsegment) {
+      const messages = await Message.find();
+      res.status(200).json({
+        status: "success",
+        data: {
+          messages,
+        },
+      });
+    });
+  });
+
+io.on("connection", (socket) => {
+  function onNewMessage(newMessage) {
+    if (socket.connected) {
+      socket.emit("new-message", JSON.parse(newMessage));
+    }
+  }
+
+  messageNotification.on("new-message", onNewMessage);
+
+  socket.on("disconnect", () => {
+    messageNotification.removeListener("new-message", onNewMessage);
+    socket._cleanup();
+    socket.disconnect();
   });
 });
+
+app.use(AWSXRay.express.closeSegment());
 
 (async () => {
   await mongoose.connect(
     process.env.MONGO_URI.replace("<password>", process.env.MONGO_PASSWORD)
   );
-
-  io.on("connection", (socket) => {
-    function onNewMessage(newMessage) {
-      if (socket.connected) {
-        socket.emit("new-message", JSON.parse(newMessage));
-      }
-    }
-
-    messageNotification.on("new-message", onNewMessage);
-
-    socket.on("set-username", (username) => {
-      socket.data.username = username;
-    });
-
-    socket.on("new-message", async (msg) => {
-      const command = new PublishCommand({
-        Message: JSON.stringify({
-          username: socket.data.username,
-          message: msg,
-        }),
-        TopicArn: SNS_TOPIC_ARN,
-      });
-
-      await client.send(command);
-    });
-
-    socket.on("disconnect", () => {
-      messageNotification.removeListener("new-message", onNewMessage);
-      socket._cleanup();
-      socket.disconnect();
-    });
-  });
 
   io.httpServer.listen(PORT, "0.0.0.0", async () => {
     console.log(`Server listening on PORT ${PORT}`);

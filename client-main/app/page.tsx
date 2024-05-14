@@ -3,6 +3,7 @@
 import { ScrollArea } from "@/components/ui/scroll-area";
 import socket from "@/utils/socket";
 import { useEffect, useState } from "react";
+import { useMutation, useQuery } from "react-query";
 
 interface Message {
   username: string, message: string
@@ -13,15 +14,33 @@ export default function Home() {
   const [name, setName] = useState("");
   const [msgs, setMsgs] = useState<Message[]>([]);
 
-  useEffect(() => {
-    (async () => {
+  const _ = useQuery<Message[]>({
+    queryKey: ['messages'],
+    queryFn: async function() {
       const res = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URI}/messages`)
       if (res.ok) {
         const data = await res.json();
-        setMsgs(data.data.messages as Message[]);
+        const msgs = data.data.messages;
+
+        setMsgs(msgs);
+        return msgs;
       }
-    })();
-  }, []);
+      return [];
+    }
+  });
+
+  const addMessage = useMutation<any, any, Message>({
+    mutationFn: async function(variables) {
+      console.log(variables);
+      await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URI}/messages`, {
+        method: 'POST',
+        body: JSON.stringify(variables),
+        headers: {
+          "Content-Type": "application/json"
+        }
+      })
+    }
+  })
 
   useEffect(() => {
     function onNewMessage(newMessage: Message) {
@@ -54,9 +73,6 @@ export default function Home() {
           onChange={(e) => setName(e.target.value)} 
           className="border border-black"
         />
-        <button onClick={() => {
-          socket.emit("set-username", name);
-        }} >Set</button>
       </div>
       <div className="flex items-center gap-2">
         <input 
@@ -68,7 +84,10 @@ export default function Home() {
         />
         <button onClick={() => {
           if (!name) return;
-          socket.emit("new-message", msg);
+          addMessage.mutate({
+            username: name,
+            message: msg,
+          });
         }}>Send</button>
       </div>
     </div>

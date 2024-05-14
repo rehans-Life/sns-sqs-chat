@@ -13,6 +13,7 @@
   "dependencies": {
     "@aws-sdk/client-sns": "^3.569.0",
     "aws-sdk": "^2.1615.0",
+    "aws-xray-sdk": "^3.6.0",
     "cors": "^2.8.5",
     "express": "^4.19.2",
     "helmet": "^7.1.0",

@@ -6,18 +6,26 @@ const {
 const dotenv = require("dotenv");
 const mongoose = require("mongoose");
 const Message = require("./models/Message");
+const AWSXRay = require("aws-xray-sdk");
+AWSXRay.setContextMissingStrategy("IGNORE_ERROR");
+
+const segment = new AWSXRay.Segment("message-service");
+const ns = AWSXRay.getNamespace();
 
 dotenv.config({});
 
 const QUEUE_URL = process.env.QUEUE_URL;
 
-const client = new SQSClient({
-  region: "me-south-1",
-});
+const client = AWSXRay.captureAWSv3Client(
+  new SQSClient({
+    region: "me-south-1",
+  })
+);
 
 async function poll() {
-  console.log("Poll");
   try {
+    console.log("Poll");
+
     const recieveCommand = new ReceiveMessageCommand({
       QueueUrl: QUEUE_URL,
       AttributeNames: ["All"],
@@ -34,11 +42,14 @@ async function poll() {
 
     if (!messages || !messages.length) return;
 
+    console.log(response.Messages);
     console.log(messages);
 
     const insertedMessages = await Message.insertMany(messages, {
       ordered: false,
     });
+
+    if (!insertedMessages.length) return;
 
     const deleteCommand = new DeleteMessageBatchCommand({
       QueueUrl: QUEUE_URL,
@@ -61,8 +72,10 @@ async function poll() {
         },
       });
     }
+    segment.close();
   } catch (error) {
     console.log(error);
+    segment.close(error);
   }
 }
 
@@ -71,5 +84,5 @@ async function poll() {
     process.env.MONGO_URI.replace("<password>", process.env.MONGO_PASSWORD)
   );
 
-  while (true) await poll();
+  while (true) await ns.runAndReturn(poll);
 })();
