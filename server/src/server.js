@@ -127,7 +127,7 @@ app.use(AWSXRay.express.closeSegment());
     console.log("Subscribing to SNS");
 
     const subscribeCommand = new SubscribeCommand({
-      Protocol: "https",
+      Protocol: "http",
       Endpoint: BACKEND_URI,
       TopicArn: SNS_TOPIC_ARN,
     });

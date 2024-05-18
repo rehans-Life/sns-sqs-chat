@@ -1,22 +1,10 @@
-Parameters:
-  Environment:
-    Description: Select Deployment Environment
-    Type: String
-    AllowedValues:
-      - dev
-      - prod
-    Default: dev
-  MONGO_URI:
-    Description: URI of the MongoDB 
-    Type: String
-  MONGO_PASSWORD:
-    Description: Password to the mongodb database
-    Type: String
-
-Conditions:
-  IsProdEnvironment: !Equals [!Ref Environment, prod]
-
 Resources:
+  awsChatLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: aws-chat-group
+      LogGroupClass: STANDARD
+
   snsTopic:
     Type: AWS::SNS::Topic
     Properties:
@@ -69,25 +57,6 @@ Resources:
             Condition:
               ArnEquals: 
                 aws:SourceArn: !Ref snsTopic
-
-  sqsQueuePolicy:
-    Type: AWS::SQS::QueuePolicy
-    Condition: IsProdEnvironment
-    Properties:
-      Queues:
-        - !Ref sqsQueue
-      PolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Sid: sqsQueuePolicy
-            Effect: Allow
-            Action:
-              - SQS:RecieveMessage
-              - SQS:ChangeMessageVisibility
-              - SQS:DeleteMessage
-            Principal: 
-              AWS: !GetAtt iamRole.Arn
-            Resource: !GetAtt sqsQueue.Arn
              
   snsSubscription:
     Type: AWS::SNS::Subscription
@@ -97,231 +66,24 @@ Resources:
       Endpoint: !GetAtt sqsQueue.Arn
       RawMessageDelivery: true
 
-  iamRole:
-    Type: AWS::IAM::Role
-    Condition: IsProdEnvironment
-    Properties:
-      AssumeRolePolicyDocument:
-         Version: "2012-10-17"
-         Statement:
-          - Effect: Allow
-            Principal:
-              Service: ec2.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
-
-
-  socketServerRole:
-    Type: AWS::IAM::Role
-    Condition: IsProdEnvironment
-    Properties:
-      RoleName: socket-server-role
-      Path: /
-      AssumeRolePolicyDocument: 
-           Version: "2012-10-17"
-           Statement:
-              - 
-                Effect: "Allow"
-                Principal:
-                  Service: ec2.amazonaws.com
-                Action: "sts:AssumeRole"
-                Resource: "*"      
-      ManagedPolicyArns: 
-        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
-      Policies:
-        - 
-         PolicyName: "sns-access"
-         PolicyDocument:
-           Version: "2012-10-17"
-           Statement:
-              - Sid: sns-access
-                Effect: "Allow"
-                Action: 
-                  - sns:ConfirmSubscription
-                  - sns:Publish
-                  - sns:Subscribe
-                  - sns:ListSubscriptions
-                  - sns:ListSubscriptionsByTopic
-                Resource: !Ref snsTopic
-
-  sockerServerProfile:
-      Type: AWS::IAM::InstanceProfile
-      Condition: IsProdEnvironment
-      Properties:
-        InstanceProfileName: socker-server-profile
-        Path: /
-        Roles:
-          - !Ref socketServerRole
-
-  socketServerAccessGroup:
-    Type: AWS::EC2::SecurityGroup
-    Condition: IsProdEnvironment
-    Properties:
-      GroupDescription: security group for accessing security group
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 22
-          ToPort: 22
-          CidrIp: 0.0.0.0/0
-        - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
-          CidrIp: 0.0.0.0/0
-
-  awsChatLogGroup:
-    Type: AWS::Logs::LogGroup
-    Properties:
-      LogGroupName: aws-chat-group
-      LogGroupClass: STANDARD
-
-  socketServerLaunchConfig:
-    Type: AWS::AutoScaling::LaunchConfiguration
-    Condition: IsProdEnvironment
-    Properties:
-      LaunchConfigurationName: socker-server
-      AssociatePublicIpAddress: false
-      IamInstanceProfile: !Ref sockerServerProfile
-      ImageId: ami-0bb84b8ffd87024d8
-      EbsOptimized: false
-      InstanceMonitoring: false
-      InstanceType: t2.micro
-      SecurityGroups:
-        - !Ref socketServerAccessGroup
-      UserData: !Base64 |
-        #!/bin/bash -ex
-        sudo yum install -y gcc-c++ make
-        curl -sL https://rpm.nodesource.com/setup_16.x | sudo -E bash -
-        sudo yum install -y nodejs
-
-        sudo yum install -y git
-        git clone https://github.com/rehans-Life/sns-sqs-chat.git
-
-        sudo yum install amazon-cloudwatch-agent
-        
-        cat > /etc/systemd/system/socketServer.service <<- EOM
-        [Unit]
-        Description=socketServer
-        After=multi-user.target
-
-        [Service]
-        ExecStart=/usr/bin/node /home/ec2-user/sns-sqs-chat/server/src/server.js
-        Restart=always
-        RestartSec=10
-        StandardOutput=syslog
-        StandardError=syslog
-        SyslogIdentifier=socketServer
-        User=ec2-user
-        EnvironmentFile=/home/ec2-user/sns-sqs-chat/app.env
-
-        [Install]
-        WantedBy=multi-user.target
-        WantedBy=cloud-init.target
-        EOM
-
-        sudo systemctl start socketServer.service
-        sudo systemctl enable socketServer.service
-        sudo systemctl status socketServer.service 
-
-        cat > /home/ec2-user/common-config.toml <<- EOM
-        [AmazonCloudWatchAgent]
-        region = "me-south-1"
-        EOM
-
-        sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/home/ec2-user/common-config.toml
-
-  socketInstancestargetGroup:
-    Type: AWS::ElasticLoadBalancingV2::TargetGroup
-    Condition: IsProdEnvironment
-    Properties:
-      IpAddressType: ipv4
-      TargetType: instance
-      Protocol: HTTP
-      ProtocolVersion: HTTP1
-      PORT: 80
-      HealthCheckProtocol: HTTP
-      HealthCheckPath: /
-      HealthCheckPort: 80
-
-  socketServerASG:
-    Type: AWS::AutoScaling::AutoScalingGroup
-    Condition: IsProdEnvironment
-    Properties:
-      AvailabilityZones: !GetAZs 'me-south-1'
-      LaunchConfigurationName: !Ref socketServerLaunchConfig
-      TargetGroupARNs: !Ref socketInstancestargetGroup
-      MaxSize: 3
-      MinSize: 1
-      DesiredCapacity: 1
-
-  messageServiceSg:
-    Type: AWS::EC2::SecurityGroup
-    Condition: IsProdEnvironment
-    Properties:
-      GroupName: message-service-sg
-      GroupDescription: outbound rule for ec2
-      SecurityGroupEgress:
-        - IpProtocol: tcp
-          FromPort: "*"
-          ToPort: "*"
-          CidrIp: "*"
-
-  ec2AccessSqsProfile:
-    Type: AWS::IAM::InstanceProfile
-    Condition: IsProdEnvironment
-    Properties:
-      Path: /
-      Roles:
-        - !Ref iamRole
-
-  messageServiceInstance:
-    Type: AWS::EC2::Instance
-    Condition: IsProdEnvironment
-    Properties:
-      Monitoring: false
-      IamInstanceProfile: !Ref ec2AccessSqsProfile
-      ImageId: ami-0bb84b8ffd87024d8
-      InstanceType: t2.micro
-      SecurityGroups:
-        - !Ref messageServiceSg
-      UserData: !Base64 |
-        #!/bin/bash -ex
-        sudo yum install -y gcc-c++ make
-        curl -sL https://rpm.nodesource.com/setup_16.x | sudo -E bash -
-        sudo yum install -y nodejs
-
-        sudo yum install -y git
-        git clone https://github.com/rehans-Life/sns-sqs-chat.git
-
-        sudo yum install amazon-cloudwatch-agent
-
-        cat > /etc/systemd/system/messageService.service <<- EOM
-        [Unit]
-        Description=messageService
-        After=multi-user.target
-
-        [Service]
-        ExecStart=/usr/bin/node /home/ec2-user/sns-sqs-chat/message-service/server.js
-        Restart=always
-        RestartSec=10
-        StandardOutput=syslog
-        StandardError=syslog
-        SyslogIdentifier=messageService
-        User=ec2-user
-        EnvironmentFile=/home/ec2-user/sns-sqs-chat/app.env
-
-        [Install]
-        WantedBy=multi-user.target
-        WantedBy=cloud-init.target
-        EOM
-
-        sudo systemctl start messageService.service
-        sudo systemctl enable messageService.service
-        sudo systemctl status messageService.service 
-
-        cat > /home/ec2-user/common-config.toml <<- EOM
-        [AmazonCloudWatchAgent]
-        region = "me-south-1"
-        EOM
-
-        sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/home/ec2-user/common-config.toml
+Outputs:
+  QueueARN:
+    Description: ARN URL of the SQS Queue
+    Value: !GetAtt sqsQueue.Arn
+    Export: 
+      Name: QueueARN
+  QueueURL:
+    Description: HTTP URL of the SQS Queue
+    Value: !Ref sqsQueue
+    Export: 
+      Name: QueueURL
+  TopicARN:
+    Description: ARN for the SNS Topic
+    Value: !Ref snsTopic
+    Export: 
+      Name: TopicARN
+  LogGroupName:
+    Description: Log Group Name
+    Value: !Ref awsChatLogGroup
+    Export: 
+      Name: LogGroupName

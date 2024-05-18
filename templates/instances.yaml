@@ -1,0 +1,621 @@
+Parameters:
+  Environment:
+    Description: Select Deployment Environment
+    Type: String
+    AllowedValues:
+      - dev
+      - prod
+    Default: dev
+
+  MONGOURI:
+    Description: URI of the MongoDB 
+    Type: String
+    Default: ""
+    
+  MONGOPASSWORD:
+    Description: Password to the mongodb database
+    Type: String
+    Default: ""
+
+Mappings: 
+  Vpc: 
+    Id: 
+      Default: vpc-057a3db3bc80d418e
+
+Conditions:
+  IsProdEnvironment: !Equals [!Ref Environment, prod]
+
+Resources:
+
+  iamRole:
+    Type: AWS::IAM::Role
+    Condition: IsProdEnvironment
+    Properties:
+      AssumeRolePolicyDocument:
+         Version: "2012-10-17"
+         Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - 
+         PolicyName: "sns-access"
+         PolicyDocument:
+           Version: "2012-10-17"
+           Statement:
+              - Effect: "Allow"
+                Action: 
+                  - SQS:ReceiveMessage
+                  - SQS:ChangeMessageVisibility
+                  - SQS:DeleteMessage
+                Resource: !ImportValue QueueARN
+
+  socketServerRole:
+    Type: AWS::IAM::Role
+    Condition: IsProdEnvironment
+    Properties:
+      RoleName: socket-server-role
+      Path: /
+      AssumeRolePolicyDocument: 
+           Version: "2012-10-17"
+           Statement:
+              - 
+                Effect: "Allow"
+                Principal:
+                  Service: ec2.amazonaws.com
+                Action: "sts:AssumeRole"
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - 
+         PolicyName: "sns-access"
+         PolicyDocument:
+           Version: "2012-10-17"
+           Statement:
+              - Effect: "Allow"
+                Action: 
+                  - sns:ConfirmSubscription
+                  - sns:Publish
+                  - sns:Subscribe
+                  - sns:ListSubscriptions
+                  - sns:ListSubscriptionsByTopic
+                Resource: !ImportValue TopicARN
+
+  socketServerProfile:
+      Type: AWS::IAM::InstanceProfile
+      Condition: IsProdEnvironment
+      Properties:
+        InstanceProfileName: socker-server-profile
+        Path: /
+        Roles:
+          - !Ref socketServerRole
+
+  socketServerAccessGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: IsProdEnvironment
+    Properties:
+      GroupDescription: security group for accessing socket server
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  socketAlbAccessGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: IsProdEnvironment
+    Properties:
+      GroupDescription: security group for accessing socket alb
+      VpcId: !FindInMap [Vpc, Id, Default]
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+
+  socketServerLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Condition: IsProdEnvironment
+    Properties:
+      KeyName: ec2-access-key
+      LaunchConfigurationName: socker-server
+      AssociatePublicIpAddress: true
+      IamInstanceProfile: !Ref socketServerProfile
+      ImageId: ami-087f3ec3fdda67295
+      EbsOptimized: false
+      InstanceMonitoring: false
+      InstanceType: t3.micro
+      SecurityGroups:
+        - !GetAtt socketServerAccessGroup.GroupId
+      UserData: 
+        Fn::Base64: 
+          Fn::Join:  
+            - "" 
+            - 
+              - |
+                #!/bin/bash -ex
+                
+                sudo apt update
+                sudo apt install nodejs -y
+                sudo apt install npm -y
+
+                sudo apt install -y git
+                git clone https://github.com/rehans-Life/sns-sqs-chat.git
+
+                wget https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+                sudo dpkg -i -E ./amazon-cloudwatch-agent.deb
+
+                sudo apt-get install libcap2-bin -y
+                sudo setcap cap_net_bind_service=+ep `readlink -f \`which node\`` 
+
+                sudo touch /etc/systemd/system/socketServer.service
+                sudo chmod 747 /etc/systemd/system/socketServer.service
+                
+                cat > /etc/systemd/system/socketServer.service <<- EOM
+                [Unit]
+                Description=socketServer
+                After=network.target multi-user.target
+
+                [Service]
+                ExecStart=/bin/node /sns-sqs-chat/server/src/server.js
+                Restart=always
+                RestartSec=10
+                StandardOutput=journal
+                StandardError=journal
+                SyslogIdentifier=socketServer
+                User=ubuntu
+                EnvironmentFile=/sns-sqs-chat/app.env
+
+                [Install]
+                WantedBy=multi-user.target
+                EOM
+
+                TOKEN=`curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600"`
+
+                MY_HOSTNAME=`curl -H "X-aws-ec2-metadata-token: $TOKEN" "http://169.254.169.254/latest/meta-data/public-hostname"`
+
+                ImageId=`curl -H "X-aws-ec2-metadata-token: $TOKEN" "http://169.254.169.254/latest/meta-data/ami-id"`
+
+                InstanceId=`curl -H "X-aws-ec2-metadata-token: $TOKEN" "http://169.254.169.254/latest/meta-data/instance-id"`
+
+                InstanceType=`curl -H "X-aws-ec2-metadata-token: $TOKEN" "http://169.254.169.254/latest/meta-data/instance-type"`
+
+                echo $MY_HOSTNAME
+
+                touch /sns-sqs-chat/app.env
+                sudo chmod 747 /sns-sqs-chat/app.env
+
+                cat > /sns-sqs-chat/app.env <<- EOM
+                PORT=80
+                BACKEND_URI=http://$MY_HOSTNAME
+              - FRONTEND_URI=http://
+              - !GetAtt uiInstance.PublicDnsName
+              - !Sub
+                - |
+
+                  SNS_TOPIC_ARN=${TopicARN}
+                - TopicARN: !ImportValue TopicARN
+              - !Sub
+                - | 
+
+                  MONGO_URI=${MONGOURI}
+                - MONGOURI: !Ref MONGOURI
+               
+              - !Sub
+                - |
+
+                  MONGO_PASSWORD=${MONGOPASSWORD}
+                - MONGOPASSWORD: !Ref MONGOPASSWORD
+              - |
+
+                EOM
+
+                touch /config.json
+                sudo chmod 747 /config.json
+
+              - !Sub
+                - GROUP_NAME=${LogGroupName}
+                - LogGroupName: !ImportValue LogGroupName
+
+              - |
+
+                cat > /config.json <<- EOM
+                {
+                        "agent": {
+                          "metrics_collection_interval": 60,
+                          "run_as_user": "cwagent",
+                          "region": "me-south-1"
+                        },
+                        "logs": {
+                                "logs_collected": {
+                                        "files": {
+                                                "collect_list": [
+                                                        {
+                                                          "file_path": "/var/log/syslog",
+                                                          "log_group_name": "$GROUP_NAME",
+                                                          "log_stream_name": "socket-server",
+                                                          "retention_in_days": -1
+                                                        }
+                                                ]
+                                        }
+                                }
+                        },
+                        "metrics": {
+                                "aggregation_dimensions": [
+                                        [
+                                          "InstanceId"
+                                        ]
+                                ],
+                                "append_dimensions": {
+                                        "ImageId": "$ImageId",
+                                        "InstanceId": "$InstanceId",
+                                        "InstanceType": "$InstanceType"
+                                },
+                                "metrics_collected": {
+                                        "collectd": {
+                                                "metrics_aggregation_interval": 60
+                                        },
+                                        "disk": {
+                                                "measurement": [
+                                                        "used_percent"
+                                                ],
+                                                "metrics_collection_interval": 60,
+                                                "resources": [
+                                                        "*"
+                                                ]
+                                        },
+                                        "mem": {
+                                                "measurement": [
+                                                        "mem_used_percent"
+                                                ],
+                                                "metrics_collection_interval": 60
+                                        },
+                                        "statsd": {
+                                                "metrics_aggregation_interval": 60,
+                                                "metrics_collection_interval": 10,
+                                                "service_address": ":8125"
+                                        }
+                                }
+                        },
+                        "traces": {
+                                "buffer_size_mb": 3,
+                                "concurrency": 8,
+                                "insecure": false,
+                                "region_override": "me-south-1",
+                                "traces_collected": {
+                                        "xray": {
+                                                "bind_address": "127.0.0.1:2000",
+                                                "tcp_proxy": {
+                                                        "bind_address": "127.0.0.1:2000"
+                                                }
+                                        }
+                                }
+                        }
+                }
+                EOM
+                sudo chmod 644 /var/log/syslog
+
+                sudo mkdir -p /usr/share/collectd/
+                sudo touch /usr/share/collectd/types.db
+
+                sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/config.json
+
+                cd /sns-sqs-chat/server
+                sudo npm install
+
+                sudo systemctl start socketServer.service 
+                sudo systemctl enable socketServer.service
+                sudo systemctl status socketServer.service 
+
+  socketListener:    
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: IsProdEnvironment
+    Properties: 
+      DefaultActions:
+        -  
+          TargetGroupArn: !Ref socketInstancestargetGroup
+          Type: forward
+      LoadBalancerArn: !Ref socketASGLoadBalancer
+      Port: 80
+      Protocol: HTTP
+        
+  socketASGLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Condition: IsProdEnvironment
+    Properties:
+      IpAddressType: ipv4
+      Name: socket-asg-load-balancer
+      Scheme: internet-facing
+      SecurityGroups: 
+        - !Ref socketAlbAccessGroup
+      Type: application
+      SubnetMappings: 
+        - 
+          SubnetId: subnet-0fe2ecae468788b20
+        - 
+          SubnetId: subnet-09b624cfd823639e2
+        - 
+          SubnetId: subnet-05c657f6edaf3e9ce
+
+  socketInstancestargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: IsProdEnvironment
+    Properties:
+      IpAddressType: ipv4
+      TargetType: instance
+      Protocol: HTTP
+      ProtocolVersion: HTTP1
+      Port: 80
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /
+      HealthCheckPort: 80
+      VpcId: !FindInMap [Vpc, Id, Default]
+
+  socketServerASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Condition: IsProdEnvironment
+    Properties:
+      AvailabilityZones: !GetAZs 'me-south-1'
+      LaunchConfigurationName: !Ref socketServerLaunchConfig
+      TargetGroupARNs: 
+        - !Ref socketInstancestargetGroup
+      MaxSize: 3
+      MinSize: 1
+      DesiredCapacity: 1
+
+  ec2AccessSqsProfile:
+    Type: AWS::IAM::InstanceProfile
+    Condition: IsProdEnvironment
+    Properties:
+      Path: /
+      Roles:
+        - !Ref iamRole
+
+  uiSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: security group for ui
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+
+  uiInstance:
+    Type: AWS::EC2::Instance
+    Condition: IsProdEnvironment
+    Properties:
+      KeyName: ec2-access-key
+      ImageId: ami-08bdef0a3c54a7bbb
+      InstanceType: t3.micro
+      Monitoring: false
+      SecurityGroups:
+        - !Ref uiSecurityGroup
+      UserData: 
+        Fn::Base64: 
+          Fn::Join: 
+            - ""
+            - 
+              - |
+                #!/bin/bash -ex
+                sudo yum install -y gcc-c++ make
+                curl -sL https://rpm.nodesource.com/setup_20.x | sudo -E bash -
+                sudo yum install -y nodejs
+
+                sudo yum install libcap
+                sudo setcap cap_net_bind_service=+ep `readlink -f \`which node\``
+
+                sudo yum install -y git
+                git clone https://github.com/rehans-Life/sns-sqs-chat.git
+
+              - !Sub
+                - export NEXT_PUBLIC_BACKEND_URI=http://${DNS}
+                - DNS: !GetAtt socketASGLoadBalancer.DNSName
+              - |
+
+                cd /sns-sqs-chat/client-main
+                npm install
+                npm run build
+                npm run start -- -p 80
+
+  messageServiceInstance:
+    Type: AWS::EC2::Instance
+    Condition: IsProdEnvironment
+    Properties:
+
+      KeyName: ec2-access-key
+      Monitoring: false
+      IamInstanceProfile: !Ref ec2AccessSqsProfile
+      ImageId: ami-087f3ec3fdda67295
+      InstanceType: t3.micro
+      UserData: 
+        Fn::Base64: 
+          Fn::Join: 
+            - "" 
+            - 
+              - | 
+                #!/bin/bash -ex
+
+                sudo apt update
+                sudo apt install nodejs -y
+                sudo apt install npm -y
+
+                sudo apt install -y git
+                git clone https://github.com/rehans-Life/sns-sqs-chat.git
+
+                wget https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+                sudo dpkg -i -E ./amazon-cloudwatch-agent.deb
+
+                TOKEN=`curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600"`
+                
+                ImageId=`curl -H "X-aws-ec2-metadata-token: $TOKEN" "http://169.254.169.254/latest/meta-data/ami-id"`
+
+                InstanceId=`curl -H "X-aws-ec2-metadata-token: $TOKEN" "http://169.254.169.254/latest/meta-data/instance-id"`
+
+                InstanceType=`curl -H "X-aws-ec2-metadata-token: $TOKEN" "http://169.254.169.254/latest/meta-data/instance-type"`
+
+                sudo touch /etc/systemd/system/messageService.service
+                sudo chmod 747 /etc/systemd/system/messageService.service
+
+                cat > /etc/systemd/system/messageService.service <<- EOM
+                [Unit]
+                Description=messageService
+                After=network.target multi-user.target
+
+                [Service]
+                ExecStart=/bin/node /sns-sqs-chat/message-service/server.js
+                Restart=always
+                RestartSec=10
+                StandardOutput=journal
+                StandardError=journal
+                SyslogIdentifier=messageService
+                User=ubuntu
+                EnvironmentFile=/sns-sqs-chat/app.env
+
+                [Install]
+                WantedBy=multi-user.target
+                EOM
+
+                touch /sns-sqs-chat/app.env
+                sudo chmod 747 /sns-sqs-chat/app.env
+
+                cat > /sns-sqs-chat/app.env <<- EOM
+              - !Sub 
+                - |
+                  
+                  QUEUE_URL=${QueueURL} 
+                - QueueURL: !ImportValue QueueURL
+              - !Sub
+                - | 
+
+                  MONGO_URI=${MONGOURI}
+                - MONGOURI: !Ref MONGOURI
+               
+              - !Sub
+                - |
+
+                  MONGO_PASSWORD=${MONGOPASSWORD}
+                - MONGOPASSWORD: !Ref MONGOPASSWORD
+              - |
+
+                EOM
+
+                touch /config.json
+                sudo chmod 747 /config.json
+
+              - !Sub
+                - GROUP_NAME="${LogGroupName}"
+                - LogGroupName: !ImportValue LogGroupName
+              - |
+
+                cat > /config.json <<- EOM
+                {
+                        "agent": {
+                                "metrics_collection_interval": 60,
+                                "run_as_user": "cwagent",
+                                "region": "me-south-1"
+                        },
+                        "logs": {
+                                "logs_collected": {
+                                        "files": {
+                                                "collect_list": [
+                                                        {
+                                                                "file_path": "/var/log/syslog",
+                                                                "log_group_name": "$GROUP_NAME",
+                                                                "log_stream_name": "message-service",
+                                                                "retention_in_days": -1,
+                                                                "filters": [
+                                                                  {
+                                                                    "type": "exclude",
+                                                                    "expression": "Poll"
+                                                                  }
+                                                                ]
+                                                        }
+                                                ]
+                                        }
+                                }
+                        },
+                        "metrics": {
+                                "aggregation_dimensions": [
+                                        [
+                                                "InstanceId"
+                                        ]
+                                ],
+                                "append_dimensions": {
+                                        "ImageId": "$ImageId",
+                                        "InstanceId": "$InstanceId",
+                                        "InstanceType": "$InstanceType"
+                                },
+                                "metrics_collected": {
+                                        "collectd": {
+                                                "metrics_aggregation_interval": 60
+                                        },
+                                        "disk": {
+                                                "measurement": [
+                                                        "used_percent"
+                                                ],
+                                                "metrics_collection_interval": 60,
+                                                "resources": [
+                                                        "*"
+                                                ]
+                                        },
+                                        "mem": {
+                                                "measurement": [
+                                                        "mem_used_percent"
+                                                ],
+                                                "metrics_collection_interval": 60
+                                        },
+                                        "statsd": {
+                                                "metrics_aggregation_interval": 60,
+                                                "metrics_collection_interval": 10,
+                                                "service_address": ":8125"
+                                        }
+                                }
+                        },
+                        "traces": {
+                                "buffer_size_mb": 3,
+                                "concurrency": 8,
+                                "insecure": false,
+                                "region_override": "me-south-1",
+                                "traces_collected": {
+                                        "xray": {
+                                                "bind_address": "127.0.0.1:2000",
+                                                "tcp_proxy": {
+                                                        "bind_address": "127.0.0.1:2000"
+                                                }
+                                        }
+                                }
+                        }
+                }
+                EOM
+
+                sudo chmod 644 /var/log/syslog
+
+                sudo mkdir -p /usr/share/collectd/
+                sudo touch /usr/share/collectd/types.db
+
+                sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/config.json
+
+                cd /sns-sqs-chat/message-service
+                sudo npm install
+
+                sudo systemctl start messageService.service
+                sudo systemctl enable messageService.service
+                sudo systemctl status messageService.service
+
+Outputs:
+  Domain:
+    Description: URL to the frontend
+    Value: !GetAtt uiInstance.PublicDnsName

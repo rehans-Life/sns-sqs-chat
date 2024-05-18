@@ -42,12 +42,21 @@ async function poll() {
 
     if (!messages || !messages.length) return;
 
-    console.log(response.Messages);
-    console.log(messages);
-
     const insertedMessages = await Message.insertMany(messages, {
       ordered: false,
     });
+
+    if (messages.length !== insertedMessages.length) {
+      messages.forEach((message) => {
+        if (
+          !insertedMessages.some(
+            (insertedMsg) => insertedMsg.message_id == message.message_id
+          )
+        ) {
+          console.log("Unserted Message", message);
+        }
+      });
+    }
 
     if (!insertedMessages.length) return;
 
